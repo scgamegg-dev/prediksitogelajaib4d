@@ -6445,7 +6445,7 @@ main,
       ]
     };
 
-    window.MADETOTO_CONFIG = CONFIG;
+    window.AJAIB4D_CONFIG = CONFIG;
 
     const BASE_MARKETS = [
       {
@@ -8612,6 +8612,188 @@ main,
 
   
   <script>
+    (function patchWuhanSchedule() {
+ 
+  /* 6 slot result dalam detik dari midnight */
+  const WUHAN_RESULT_SLOTS = [
+    9  * 3600,   /* 09:00 */
+    12 * 3600,   /* 12:00 */
+    15 * 3600,   /* 15:00 */
+    18 * 3600,   /* 18:00 */
+    21 * 3600,   /* 21:00 */
+    0  * 3600    /* 00:00  (alias 24*3600 = 86400 untuk perhitungan) */
+  ];
+ 
+  /* 00:00 diperlakukan sebagai 86400 agar urutan kronologis benar */
+  const WUHAN_SLOTS_SORTED = [
+    9  * 3600,
+    12 * 3600,
+    15 * 3600,
+    18 * 3600,
+    21 * 3600,
+    24 * 3600    /* 00:00 hari berikutnya */
+  ];
+ 
+  /* Jendela "Sedang Diundi" = 20 menit sebelum result */
+  const DRAW_WINDOW_SEC = 20 * 60;
+ 
+  /* Jendela "Buka" = interval antara result sebelumnya + 1 detik
+     hingga 20 menit sebelum result berikutnya */
+ 
+  /**
+   * Cari slot result berikutnya (detik dari midnight, bisa > 86400 untuk 00:00)
+   * @param {number} nowSec  detik WIB dari midnight (0–86399)
+   * @returns {{ slotSec: number, isSlot00: boolean }}
+   */
+  function getNextWuhanSlot(nowSec) {
+    for (const slotSec of WUHAN_SLOTS_SORTED) {
+      if (slotSec > nowSec) {
+        return { slotSec, isSlot00: slotSec === 24 * 3600 };
+      }
+    }
+    /* Sudah melewati semua slot hari ini → slot berikutnya 09:00 besok */
+    return { slotSec: (24 + 9) * 3600, isSlot00: false };
+  }
+ 
+  /**
+   * Cari slot result sebelumnya (kapan result terakhir terjadi)
+   * @param {number} nowSec
+   * @returns {number|null}  detik dari midnight, atau null jika belum ada hari ini
+   */
+  function getLastWuhanSlot(nowSec) {
+    let last = null;
+    for (const slotSec of WUHAN_SLOTS_SORTED) {
+      if (slotSec <= nowSec) last = slotSec;
+      else break;
+    }
+    return last;
+  }
+ 
+  /**
+   * Hitung runtime untuk TOTO WUHAN berdasarkan waktu WIB sekarang.
+   * Menggantikan getCycleRuntime() asli.
+   *
+   * State machine:
+   *   nowSec ∈ [slotSec - DRAW_WINDOW, slotSec)  → "Sedang Diundi"
+   *   nowSec ∈ [lastSlot, slotSec - DRAW_WINDOW)  → "Buka"  (sudah result sebelumnya, tunggu berikutnya)
+   *   nowSec < firstSlot (< 09:00)                → "Menunggu" (belum ada result hari ini)
+   *
+   * @param {number} nowSec  detik WIB dari midnight
+   * @returns {object}  runtime object kompatibel dengan dashboard
+   */
+  function getWuhanRuntime(nowSec) {
+    const { slotSec } = getNextWuhanSlot(nowSec);
+    const countdown    = slotSec - nowSec;          /* selalu > 0 */
+    const nextTimeHHMM = secToHHMM(slotSec % 86400);
+ 
+    /* === SEDANG DIUNDI (20 menit menjelang result) === */
+    if (countdown <= DRAW_WINDOW_SEC) {
+      return {
+        status:      'Sedang Diundi',
+        key:         'wait',
+        statusClass: 'state-wait',
+        badgeClass:  'badge-wait',
+        phase:       'Result dalam',
+        countdown,
+        prioritySec: countdown,
+        closeText:   'Tiap slot terjadwal',
+        drawText:    `Result ${nextTimeHHMM}`,
+        metaText:    `Sedang Diundi • Result ${nextTimeHHMM}`
+      };
+    }
+ 
+    /* === BUKA (sudah ada result sebelumnya, menunggu slot berikut) === */
+    const lastSlot = getLastWuhanSlot(nowSec);
+    if (lastSlot !== null) {
+      return {
+        status:      'Buka',
+        key:         'open',
+        statusClass: 'state-open',
+        badgeClass:  'badge-open',
+        phase:       'Result berikutnya',
+        countdown,
+        prioritySec: countdown,
+        closeText:   'Tiap slot terjadwal',
+        drawText:    `Berikutnya ${nextTimeHHMM}`,
+        metaText:    `Buka • Result berikutnya ${nextTimeHHMM}`
+      };
+    }
+ 
+    /* === MENUNGGU (sebelum 09:00, belum ada result hari ini) === */
+    return {
+      status:      'Menunggu',
+      key:         'wait',
+      statusClass: 'state-wait',
+      badgeClass:  'badge-wait',
+      phase:       'Result pertama pukul',
+      countdown,
+      prioritySec: countdown,
+      closeText:   '09:00 WIB',
+      drawText:    `Result pertama ${nextTimeHHMM}`,
+      metaText:    `Menunggu • Result pertama ${nextTimeHHMM}`
+    };
+  }
+ 
+  /* --- Override fungsi-fungsi yang perlu diganti --- */
+ 
+  /**
+   * Ganti getCycleRuntime: dulu pakai siklus 3 jam bebas,
+   * sekarang pakai slot terjadwal ketat.
+   */
+  window.getCycleRuntime = function getCycleRuntime(nowSec) {
+    return getWuhanRuntime(nowSec);
+  };
+ 
+  /**
+   * Ganti getWuhanCycleInfo: dipakai oleh getWuhanNumberPack
+   * untuk membuat seed prediksi per siklus.
+   * Sekarang cycleIndex = indeks slot (0–5) agar angka berbeda tiap slot.
+   */
+  window.getWuhanCycleInfo = function getWuhanCycleInfo(nowParts) {
+    const nowSec = nowParts.totalSec;
+    /* Cari slot terakhir yang sudah lewat sebagai "slot aktif" */
+    let activeSlotIndex = -1;
+    let activeSlotSec   = 0;
+    for (let i = 0; i < WUHAN_SLOTS_SORTED.length; i++) {
+      if (WUHAN_SLOTS_SORTED[i] <= nowSec) {
+        activeSlotIndex = i;
+        activeSlotSec   = WUHAN_SLOTS_SORTED[i];
+      } else {
+        break;
+      }
+    }
+ 
+    if (activeSlotIndex === -1) {
+      /* Sebelum 09:00: gunakan slot 00:00 hari sebelumnya (index 5) */
+      activeSlotIndex = 5;
+      activeSlotSec   = 0;
+    }
+ 
+    const cycleIndex    = activeSlotIndex;           /* 0–5 */
+    const cycleStartSec = activeSlotSec;
+    const cycleEndSec   = WUHAN_SLOTS_SORTED[Math.min(activeSlotIndex + 1, 5)] || 86400;
+ 
+    return { cycleIndex, cycleStartSec, cycleEndSec };
+  };
+ 
+  /* Helper secToHHMM — sudah ada di halaman, tapi kita buat fallback lokal */
+  function secToHHMM(sec) {
+    const safe = ((sec % 86400) + 86400) % 86400;
+    const h = Math.floor(safe / 3600);
+    const m = Math.floor((safe % 3600) / 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+ 
+  /* Paksa re-render dashboard setelah patch terpasang */
+  if (typeof performDashboardSync === 'function') {
+    window.setTimeout(function () {
+      performDashboardSync(true);
+    }, 0);
+  }
+ 
+  console.info('[WuhanPatch] Slot result terjadwal: 09:00, 12:00, 15:00, 18:00, 21:00, 00:00');
+ 
+})();
     function renderHero(enriched){
       const next = getNextMarket(enriched);
       if(!next) return;
